@@ -1,4 +1,7 @@
-//v1
+//v2
+//added keyboard
+//added button matrix
+//and idk what else
 #pragma once
 #include <M5Unified.h>
 #include "montserrat24.h"
@@ -18,6 +21,7 @@ inline Rect bounds{0,0,0,0};
 inline Rect clip{0,0,0,0};
 inline int offsetX=0, offsetY=0;
 // Compose only the damaged rectangle in PSRAM. Never expose its clear pass.
+inline lgfx::LovyanGFX* output=&M5.Display;
 inline M5Canvas frame(&M5.Display);
 inline M5Canvas* target=&frame;
 inline Rect frameRect{0,0,0,0};
@@ -35,7 +39,7 @@ inline bool beginFrame() {
   return true;
 }
 inline void endFrame() {
-  frame.pushSprite(&M5.Display,bounds.x+frameRect.x,bounds.y+frameRect.y);
+  frame.pushSprite(output,bounds.x+frameRect.x,bounds.y+frameRect.y);
 }
 
 inline void begin(int x,int y,int w,int h) { bounds={x,y,w,h}; clip={0,0,w,h}; offsetX=offsetY=0; }
@@ -146,6 +150,125 @@ inline void button(Rect r,const char* title,const Style& style=Style{}) {
   text(title,r.x+(r.w-textWidth(title))/2,r.y+(r.h-27)/2,style.foreground,style.background);
 }
 inline bool tapped(Rect r,int x,int y) { return r.contains(x,y); }
+
+// Reusable grid; labels remain owned by the app. Touch coordinates are local
+// to the same content space as rect. select() returns true on selection change.
+struct ButtonMatrix {
+  Rect rect{0,0,300,140};
+  const char* const* labels=nullptr;
+  int count=0, columns=3, gap=10, selected=-1;
+  const int* columnWeights=nullptr; // Optional relative widths, one per column.
+  Style style{};
+  Style selectedStyle{0xDEFB,0x8410,0x0000,16,2};
+  int rows() const { return columns>0 ? (max(0,count)+columns-1)/columns : 0; }
+  Rect cell(int index) const {
+    int n=rows();
+    if(index<0 || index>=count || !n) return {0,0,0,0};
+    int spacing=max(0,gap);
+    int width=rect.w-(columns-1)*spacing;
+    int height=rect.h-(n-1)*spacing;
+    if(width<columns || height<n) return {0,0,0,0};
+    int col=index%columns, row=index/columns;
+    int total=columns, before=col, weight=1;
+    if(columnWeights) {
+      total=0; before=0;
+      for(int c=0;c<columns;++c) {
+        int v=max(1,columnWeights[c]);
+        total+=v; if(c<col) before+=v;
+      }
+      weight=max(1,columnWeights[col]);
+    }
+    int left=before*width/total+col*spacing;
+    int top=row*height/n+row*spacing;
+    return {rect.x+left,rect.y+top,(before+weight)*width/total-before*width/total,
+            (row+1)*height/n-row*height/n};
+  }
+  int hitTest(int x,int y) const {
+    if(!rect.contains(x,y)) return -1;
+    for(int i=0;i<count;++i) {
+      Rect r=cell(i);
+      const Style& st=i==selected?selectedStyle:style;
+      if(r.contains(x,y) && roundedContains(x-r.x,y-r.y,r.w,r.h,st.radius)) return i;
+    }
+    return -1;
+  }
+  bool select(int index) {
+    if(index<0 || index>=count || index==selected) return false;
+    selected=index; return true;
+  }
+  void draw() const {
+    if(!labels) return;
+    for(int i=0;i<count;++i) {
+      Rect r=cell(i);
+      if(r.w>0 && r.h>0) button(r,labels[i]?labels[i]:"",i==selected?selectedStyle:style);
+    }
+  }
+};
+
+// QWERTY keyboard composed exclusively of ButtonMatrix rows.
+struct Keyboard {
+  ButtonMatrix rows[4];
+  const char* row0[10]={"Q","W","E","R","T","Y","U","I","O","P"};
+  const char* row1[11]={"Shift","A","S","D","F","G","H","J","K","L","Del"};
+  const char* row2[10]={"123","Z","X","C","V","B","N","M","Enter","."};
+  const char* row3[3]={"<",">","Space"};
+  const char* number0[10]={"1","2","3","4","5","6","7","8","9","0"};
+  const char* number1[11]={"Shift","!","@","#","$","%","^","&","*","(","Del"};
+  const char* number2[10]={"ABC",")","-","_","=","+","/","?","Enter","."};
+  const int thirdWeights[10]={1,1,1,1,1,1,1,1,2,1};
+  const int bottomWeights[3]={1,1,8};
+  bool numbers=false;
+  bool visible=false, held=false, moved=false, shift=false;
+  float progress=0, start=0;
+  uint32_t started=0;
+  int pressed=-1, startX=0,startY=0;
+  Rect rect{0,0,0,0};
+  void show(bool value) {
+    if(visible==value) return;
+    visible=value; start=progress; started=millis(); held=false;
+  }
+  bool tick() {
+    float t=min(1.0f,float(millis()-started)/240.0f);
+    float eased=t*t*(3-2*t);
+    float next=start+((visible?1.0f:0.0f)-start)*eased;
+    if(next==progress) return false;
+    progress=next; return true;
+  }
+  void layout(int w,int h) {
+    int height=min(320,h/2);
+    rect={0,h-int(height*progress),w,height};
+    const char* const* labels[]={numbers?number0:row0,numbers?number1:row1,numbers?number2:row2,row3};
+    int counts[]={10,11,10,3};
+    for(int i=0;i<4;++i) {
+      int inset=12;
+      rows[i].labels=labels[i]; rows[i].count=counts[i]; rows[i].columns=counts[i];
+      rows[i].columnWeights=i==2?thirdWeights:(i==3?bottomWeights:nullptr);
+      rows[i].gap=6;
+      rows[i].rect={inset,rect.y+10+i*(height-20)/4,w-2*inset,(height-20)/4-6};
+      rows[i].style.radius=10;
+    }
+  }
+  int hit(int x,int y) const {
+    for(int i=0;i<4;++i) { int k=rows[i].hitTest(x,y); if(k>=0) return i*16+k; }
+    return -1;
+  }
+  // Returns a key on release; dragging never types.
+  int pointer(int x,int y,bool down) {
+    if(down) {
+      if(!held) { held=true; moved=false; startX=x; startY=y; pressed=hit(x,y); }
+      if(abs(x-startX)>12 || abs(y-startY)>12) moved=true;
+      return -1;
+    }
+    int key=held && !moved && hit(x,y)==pressed?pressed:-1;
+    held=false; pressed=-1; return key;
+  }
+  void draw() const {
+    if(progress<=0) return;
+    Style background; background.background=0xEF7D; background.radius=0; background.borderWidth=0;
+    panel(rect,background);
+    for(int i=0;i<4;++i) rows[i].draw();
+  }
+};
 
 // Vertical touch scrolling. Draw content between beginContent/endContent.
 // Feed every touch sample (including release) into touch(), then tick() each loop.
